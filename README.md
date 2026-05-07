@@ -21,9 +21,12 @@ Reminders persist across reboots and Claude restarts. There is no cloud surface 
 1. Download `prompt-time-v2.2.0.zip` from the [latest release](https://github.com/RyanJamesStewart/prompt-time/releases/latest).
 2. **Right-click the zip → Extract All.** Windows must extract — running `install.bat` from inside the zip preview window will not work.
 3. Open the extracted folder, double-click **`install.bat`**.
-4. Done. Claude Desktop restarts automatically and the tools are live.
+4. If Claude Desktop is running, the installer will prompt to restart it. Accept — the MCP tools only show up after Claude Desktop is restarted.
+5. Done. The tools are live.
 
 No Node, no npm, no admin rights, no internet required.
+
+> **Don't move the extracted folder after install.** The Claude Desktop config records an absolute path to `prompt_time.ps1`. Moving or deleting the folder breaks that path silently — re-run `install.bat` from the new location if you need to relocate it.
 
 ## Usage examples
 
