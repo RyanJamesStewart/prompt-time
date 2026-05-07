@@ -20,7 +20,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$PROMPTTIME_VERSION = '2.2.4'
+$PROMPTTIME_VERSION = '2.2.5'
 
 # Pre-flight: ConstrainedLanguage mode silently kills [System.IO.File]::Replace
 # and atomic JSON writes that this script depends on. Without this guard we
@@ -318,34 +318,72 @@ if (-not $Silent) {
     Write-Host ''
 }
 
-# 8. Read claude_desktop_config.json.
-#    Shadow-first: if MSIX Claude has materialized the shadow file, that's the
-#    one it actually reads. Use it as the source of truth so we don't overwrite
-#    Claude's preferences block when we add our entry. Fall back to Real, then
-#    to a fresh empty config.
-$config = $null
-$configReadFrom = $null
-foreach ($candidate in @($ConfigPaths.Shadow, $ConfigPaths.Real)) {
-    if ($candidate -and (Test-Path $candidate)) {
-        try {
-            $raw = Get-Content $candidate -Raw -Encoding UTF8
-            $config = if ($raw.Trim()) { $raw | ConvertFrom-Json } else { [PSCustomObject]@{} }
-            $configReadFrom = $candidate
-            break
-        } catch {
-            if (-not $Silent) {
-                Write-Host '  ERROR: Could not parse Claude Desktop config.' -ForegroundColor Red
-                Write-Host "  File: $candidate"
-                Write-Host "  $_"
-            }
-            exit 1
-        }
+# 8. Read claude_desktop_config.json from BOTH paths (when they exist) and merge.
+#    The MSIX shadow trap creates a divergence: a user can have MCP servers in
+#    %APPDATA% that Claude no longer sees (because the shadow was created later
+#    by a Claude UI write that didn't include them). If we just pick one file
+#    as source of truth, we silently delete the user's other MCP servers when
+#    we write the result back. Instead: union mcpServers from both files. Shadow
+#    wins on key conflict, since shadow is the file Claude has been reading and
+#    therefore matches the user's recent expectation of "what's installed."
+function Read-ClaudeConfigFile {
+    param([string]$Path)
+    if (-not $Path -or -not (Test-Path $Path)) { return $null }
+    try {
+        $raw = Get-Content $Path -Raw -Encoding UTF8
+        if (-not $raw.Trim()) { return [PSCustomObject]@{} }
+        return $raw | ConvertFrom-Json
+    } catch {
+        throw "Could not parse $Path : $($_.Exception.Message)"
     }
 }
-if (-not $config) { $config = [PSCustomObject]@{} }
+
+try {
+    $shadowCfg = Read-ClaudeConfigFile $ConfigPaths.Shadow
+    $realCfg   = Read-ClaudeConfigFile $ConfigPaths.Real
+} catch {
+    if (-not $Silent) {
+        Write-Host '  ERROR: Could not parse Claude Desktop config.' -ForegroundColor Red
+        Write-Host "  $_"
+    }
+    exit 1
+}
+
+# Pick the base object for top-level keys (preferences etc.). Shadow first
+# because that's what Claude reads; fall back to real, then to an empty object.
+$config = if ($shadowCfg) { $shadowCfg } elseif ($realCfg) { $realCfg } else { [PSCustomObject]@{} }
 if (-not ($config | Get-Member -Name 'mcpServers' -ErrorAction SilentlyContinue)) {
     $config | Add-Member -NotePropertyName 'mcpServers' -NotePropertyValue ([PSCustomObject]@{})
 }
+
+# Union mcpServers across both files. Loop order: real first, shadow second --
+# Add-Member -Force overwrites, so shadow's value wins on conflicts.
+$merged = [PSCustomObject]@{}
+$realKeys   = @()
+$shadowKeys = @()
+if ($realCfg -and ($realCfg | Get-Member -Name 'mcpServers' -ErrorAction SilentlyContinue)) {
+    foreach ($prop in $realCfg.mcpServers.PSObject.Properties) {
+        $merged | Add-Member -NotePropertyName $prop.Name -NotePropertyValue $prop.Value -Force
+        $realKeys += $prop.Name
+    }
+}
+if ($shadowCfg -and ($shadowCfg | Get-Member -Name 'mcpServers' -ErrorAction SilentlyContinue)) {
+    foreach ($prop in $shadowCfg.mcpServers.PSObject.Properties) {
+        $merged | Add-Member -NotePropertyName $prop.Name -NotePropertyValue $prop.Value -Force
+        $shadowKeys += $prop.Name
+    }
+}
+$config.mcpServers = $merged
+
+# If we recovered any %APPDATA%-only servers (which Claude was no longer seeing
+# because the shadow trap had hidden them), surface that. It's a positive side
+# effect of the install and explains "why did my other servers reappear?"
+$rescued = @($realKeys | Where-Object { $shadowKeys -notcontains $_ -and $_ -ne 'prompt-time' })
+if (-not $Silent -and $shadowCfg -and $realCfg -and $rescued.Count -gt 0) {
+    Write-Host "  Merged $($rescued.Count) MCP server(s) from %APPDATA% that the MSIX shadow had hidden:" -ForegroundColor Cyan
+    foreach ($k in $rescued) { Write-Host "    - $k" -ForegroundColor DarkGray }
+}
+
 $realDir = Split-Path $ConfigPaths.Real
 if (-not (Test-Path $realDir)) { New-Item -ItemType Directory -Path $realDir -Force | Out-Null }
 
