@@ -53,7 +53,7 @@ $LOCK_FILE   = Join-Path $DATA_DIR 'queue.lock'
 $DEBUG_LOG   = Join-Path $DATA_DIR 'prompt-time.debug.log'
 $VERSION_FILE = Join-Path $DATA_DIR 'VERSION'
 $TASK_PREFIX = 'PROMPTTIME'
-$PROMPTTIME_VERSION = '2.2.0'
+$PROMPTTIME_VERSION = '2.2.1'
 $QUEUE_SCHEMA_V  = 1
 
 # Reminder validation limits -- enforced at schedule time so they're consistent
