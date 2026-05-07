@@ -1,0 +1,20 @@
+node_modules/
+*.log
+.vscode/
+.idea/
+
+# Editor / OS noise
+*.swp
+.DS_Store
+Thumbs.db
+
+# Local dev artifacts
+FIX-*.md
+FIX-*.txt
+FIX-*.log
+SPEC-FIX.md
+run-fix.bat
+restart_test*.ps1
+
+# Test output (CI uploads it as an artifact; not committed)
+tests/pester-results.xml
