@@ -18,7 +18,7 @@ Reminders persist across reboots and Claude restarts. There is no cloud surface 
 
 ## Install in 60 seconds
 
-1. Download `prompt-time-v2.2.2.zip` from the [latest release](https://github.com/RyanJamesStewart/prompt-time/releases/latest).
+1. Download `prompt-time-v2.2.3.zip` from the [latest release](https://github.com/RyanJamesStewart/prompt-time/releases/latest).
 2. **Right-click the zip → Extract All.** Windows must extract — running `install.bat` from inside the zip preview window will not work.
 3. Open the extracted folder, double-click **`install.bat`**.
 4. If Claude Desktop is running, the installer will prompt to restart it. Accept — the MCP tools only show up after Claude Desktop is restarted.
@@ -59,14 +59,16 @@ prompt-time resolves this once: at startup, every component (`prompt_time.ps1`, 
 
 The installer also pre-creates the queue file at the canonical path before the MCP server's first write — without that, MSIX file-virtualization redirects new file creation into the package shadow even though existing files at the real path are written through.
 
+The same trap bites the Claude Desktop config itself. If MSIX-packaged Claude has ever written to its own `claude_desktop_config.json` (e.g. saving preferences), MSIX materializes a per-package shadow copy at `%LOCALAPPDATA%\Packages\<family>\LocalCache\Roaming\Claude\claude_desktop_config.json` and then *reads from the shadow* on every subsequent boot. An installer that writes only to `%APPDATA%` becomes invisible to Claude on those machines. v2.2.3 reads shadow-first as the source of truth and writes the merged config to both paths atomically; uninstall removes from both. Run `diagnose.bat` to detect divergence.
+
 ## Troubleshooting
 
 **Notifications muted by Focus Assist.** Windows Focus Assist (Settings → System → Focus) silences toasts. Either turn it off or add `powershell.exe` to the Priority list.
 
 **Tools don't appear in Claude Desktop.**
-1. Fully quit Claude Desktop (right-click tray icon → Quit) and reopen it.
-2. Confirm `prompt-time` is in `%APPDATA%\Claude\claude_desktop_config.json` under `mcpServers`.
-3. Confirm the path in that entry still points to `prompt_time.ps1`. Moving the folder after install breaks it — re-run `install.bat` from the new location.
+1. Fully quit Claude Desktop (right-click tray icon → Quit) and reopen it. The "X" close button only minimizes; tools won't reload.
+2. Run **`diagnose.bat`** from the extracted folder. It reads your config, spawns `prompt_time.ps1` the way Claude Desktop will, reads Claude Desktop's MCP logs, and prints an actionable hint for each failure. Most "install ran but nothing appeared" cases are diagnosed here without needing IT.
+3. If `diagnose.bat` says all checks pass but tools still don't show: run `diagnose.bat -Json` and attach the output when filing a bug.
 
 **`install.bat` closes immediately.** Run it from a `cmd` prompt instead so you can read the error: `install.bat` from inside the unzipped folder. The installer also writes a debug log at `%APPDATA%\prompt-time\prompt-time.debug.log` (or the MSIX `LocalCache` equivalent) — check there.
 

@@ -14,7 +14,22 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$ConfigPath  = Join-Path $env:APPDATA 'Claude\claude_desktop_config.json'
+
+# Match install.ps1's dual-path resolution. Claude Desktop's MSIX file
+# virtualization makes the shadow path the file actually read -- we must
+# remove our entry from BOTH paths or a stray copy will resurrect it.
+function Get-ClaudeConfigPath {
+    $real = Join-Path $env:APPDATA 'Claude\claude_desktop_config.json'
+    $shadow = $null
+    try {
+        $pkg = Get-AppxPackage -Name 'Claude' -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($pkg) {
+            $shadow = Join-Path $env:LOCALAPPDATA ("Packages\{0}\LocalCache\Roaming\Claude\claude_desktop_config.json" -f $pkg.PackageFamilyName)
+        }
+    } catch { Write-Verbose "AppX lookup failed: $_" }
+    return @{ Real = $real; Shadow = $shadow }
+}
+$ConfigPaths = Get-ClaudeConfigPath
 # Match the canonical-data-dir discovery used by prompt_time.ps1 / watcher / install.
 function Get-PromptTimeDataDir {
     try {
@@ -54,34 +69,40 @@ function Exit-WithCountdown([int]$code) {
 
 Write-Banner
 
-# 1. Remove prompt-time (and any legacy cron-mcp / remind-me) entry from Claude Desktop config.
+# 1. Remove prompt-time (and any legacy cron-mcp / remind-me) entry from Claude
+#    Desktop config -- BOTH the canonical %APPDATA% path AND the MSIX shadow,
+#    if either exists. install.ps1 may have written to both; uninstall must
+#    remove from both or a stale copy in the shadow will resurrect the entry
+#    the next time Claude Desktop boots.
 $configChanged = $false
-if (Test-Path $ConfigPath) {
+$configTargets = @($ConfigPaths.Real, $ConfigPaths.Shadow) | Where-Object { $_ -and (Test-Path $_) } | Select-Object -Unique
+
+foreach ($target in $configTargets) {
     try {
-        $raw    = Get-Content $ConfigPath -Raw -Encoding UTF8
+        $raw    = Get-Content $target -Raw -Encoding UTF8
         $config = if ($raw.Trim()) { $raw | ConvertFrom-Json } else { $null }
         if ($config -and ($config | Get-Member -Name 'mcpServers' -ErrorAction SilentlyContinue)) {
+            $localChanged = $false
             foreach ($key in @('prompt-time', 'cron-mcp', 'remind-me')) {
                 if ($config.mcpServers | Get-Member -Name $key -ErrorAction SilentlyContinue) {
                     $config.mcpServers.PSObject.Properties.Remove($key)
-                    $configChanged = $true
-                    if (-not $Silent) { Write-Host "  Removed '$key' from Claude Desktop config." -ForegroundColor Green }
+                    $localChanged = $true
+                    if (-not $Silent) { Write-Host "  Removed '$key' from $target" -ForegroundColor Green }
                 }
             }
-            if ($configChanged) {
-                # Atomic write -- mirror install.ps1's pattern so a crash mid-write
-                # cannot corrupt other MCP entries the user relies on.
+            if ($localChanged) {
+                $configChanged = $true
                 $json      = $config | ConvertTo-Json -Depth 10
                 $utf8NoBom = New-Object System.Text.UTF8Encoding $false
-                $tmpPath   = "$ConfigPath.prompt-time.tmp"
-                $bakPath   = "$ConfigPath.prompt-time.bak"
+                $tmpPath   = "$target.prompt-time.tmp"
+                $bakPath   = "$target.prompt-time.bak"
                 [System.IO.File]::WriteAllText($tmpPath, $json, $utf8NoBom)
-                [System.IO.File]::Replace($tmpPath, $ConfigPath, $bakPath)
+                [System.IO.File]::Replace($tmpPath, $target, $bakPath)
             }
         }
     } catch {
         if (-not $Silent) {
-            Write-Host "  WARN: could not edit Claude Desktop config: $_" -ForegroundColor Yellow
+            Write-Host "  WARN: could not edit $target : $_" -ForegroundColor Yellow
         }
     }
 }

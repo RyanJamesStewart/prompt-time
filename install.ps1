@@ -20,12 +20,32 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$PROMPTTIME_VERSION = '2.2.2'
+$PROMPTTIME_VERSION = '2.2.3'
 $ScriptDir   = $PSScriptRoot
 $McpScript   = Join-Path $ScriptDir 'prompt_time.ps1'
 $WatcherSrc  = Join-Path $ScriptDir 'prompt-time-watcher.ps1'
-$ConfigPath  = Join-Path $env:APPDATA 'Claude\claude_desktop_config.json'
 $WatcherTask = 'PROMPTTIME-Watcher'
+
+# Resolve BOTH config paths Claude Desktop might be using:
+#   Real:   %APPDATA%\Claude\claude_desktop_config.json   -- the "canonical" path
+#   Shadow: %LOCALAPPDATA%\Packages\<family>\LocalCache\Roaming\Claude\claude_desktop_config.json
+#           -- the per-package virtualized copy MSIX-packaged Claude Desktop
+#           actually reads from once it has written to the file at least once.
+# If we write only to Real and Claude has materialized the shadow, Claude never
+# sees our entry. We must read shadow-first and write to both.
+function Get-ClaudeConfigPath {
+    $real = Join-Path $env:APPDATA 'Claude\claude_desktop_config.json'
+    $shadow = $null
+    try {
+        $pkg = Get-AppxPackage -Name 'Claude' -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($pkg) {
+            $shadow = Join-Path $env:LOCALAPPDATA ("Packages\{0}\LocalCache\Roaming\Claude\claude_desktop_config.json" -f $pkg.PackageFamilyName)
+        }
+    } catch { Write-Verbose "AppX lookup failed: $_" }
+    return @{ Real = $real; Shadow = $shadow }
+}
+$ConfigPaths = Get-ClaudeConfigPath
+$ConfigPath  = $ConfigPaths.Real    # primary path; back-compat for legacy refs
 
 # Resolve the data dir the SAME way prompt_time.ps1 and prompt-time-watcher.ps1 do:
 # discover Claude Desktop's MSIX package and use its LocalCache writable storage
@@ -53,6 +73,58 @@ function Write-Banner {
     Write-Host '  prompt-time -- Claude Desktop reminder installer (v2)'
     Write-Host '  -------------------------------------------------------'
     Write-Host ''
+}
+
+# Spawn prompt_time.ps1 the way Claude Desktop will and probe with a JSON-RPC
+# initialize. Catches AppLocker / WDAC / signature-required policies at install
+# time so the user knows BEFORE restarting Claude Desktop. Returns @{ ok; reason; stderr }.
+function Test-McpServerSpawnable {
+    [CmdletBinding()]
+    param([string]$ScriptPath, [int]$TimeoutMs = 6000)
+
+    $ps = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    if (-not (Test-Path $ps))         { return @{ ok=$false; reason="powershell.exe not found at $ps" } }
+    if (-not (Test-Path $ScriptPath)) { return @{ ok=$false; reason="prompt_time.ps1 not found at $ScriptPath" } }
+
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName               = $ps
+    $psi.Arguments              = "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$ScriptPath`""
+    $psi.RedirectStandardInput  = $true
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError  = $true
+    $psi.UseShellExecute        = $false
+    $psi.CreateNoWindow         = $true
+
+    try {
+        $proc = [System.Diagnostics.Process]::Start($psi)
+    } catch {
+        return @{ ok=$false; reason="powershell spawn failed: $($_.Exception.Message)";
+                  hint='AppLocker, WDAC, or Group Policy may block powershell.exe from launching scripts in this directory.' }
+    }
+    try {
+        $proc.StandardInput.WriteLine('{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"prompt-time-installer","version":"verify"}}}')
+        $proc.StandardInput.Flush()
+    } catch {
+        if (-not $proc.HasExited) { try { $proc.Kill() } catch { Write-Verbose "Kill: $_" } }
+        return @{ ok=$false; reason="stdin write failed: $($_.Exception.Message)" }
+    }
+
+    $readTask  = $proc.StandardOutput.ReadLineAsync()
+    $completed = $readTask.Wait($TimeoutMs)
+    $stderr = ''
+    try { if ($proc.HasExited) { $stderr = $proc.StandardError.ReadToEnd() } } catch { Write-Verbose "stderr read: $_" }
+    if (-not $proc.HasExited) {
+        try { $proc.Kill() } catch { Write-Verbose "Kill: $_" }
+        $proc.WaitForExit(2000) | Out-Null
+        if (-not $stderr) { try { $stderr = $proc.StandardError.ReadToEnd() } catch { Write-Verbose "stderr read post-kill: $_" } }
+    }
+
+    if (-not $completed) { return @{ ok=$false; reason="no JSON-RPC response within ${TimeoutMs}ms"; stderr=$stderr } }
+    $line = $readTask.Result
+    if ($line -and $line -match '"jsonrpc"\s*:\s*"2\.0"' -and $line -match '"id"\s*:\s*1') {
+        return @{ ok=$true; reason='MCP server responded to initialize' }
+    }
+    return @{ ok=$false; reason="unexpected first-line output: $line"; stderr=$stderr }
 }
 
 function Exit-WithCountdown([int]$code) {
@@ -197,27 +269,36 @@ if (-not $Silent) {
     Write-Host ''
 }
 
-# 8. Read or create claude_desktop_config.json.
-$config = [PSCustomObject]@{ mcpServers = [PSCustomObject]@{} }
-if (Test-Path $ConfigPath) {
-    try {
-        $raw = Get-Content $ConfigPath -Raw -Encoding UTF8
-        if ($raw.Trim()) { $config = $raw | ConvertFrom-Json }
-        if (-not ($config | Get-Member -Name 'mcpServers' -ErrorAction SilentlyContinue)) {
-            $config | Add-Member -NotePropertyName 'mcpServers' -NotePropertyValue ([PSCustomObject]@{})
+# 8. Read claude_desktop_config.json.
+#    Shadow-first: if MSIX Claude has materialized the shadow file, that's the
+#    one it actually reads. Use it as the source of truth so we don't overwrite
+#    Claude's preferences block when we add our entry. Fall back to Real, then
+#    to a fresh empty config.
+$config = $null
+$configReadFrom = $null
+foreach ($candidate in @($ConfigPaths.Shadow, $ConfigPaths.Real)) {
+    if ($candidate -and (Test-Path $candidate)) {
+        try {
+            $raw = Get-Content $candidate -Raw -Encoding UTF8
+            $config = if ($raw.Trim()) { $raw | ConvertFrom-Json } else { [PSCustomObject]@{} }
+            $configReadFrom = $candidate
+            break
+        } catch {
+            if (-not $Silent) {
+                Write-Host '  ERROR: Could not parse Claude Desktop config.' -ForegroundColor Red
+                Write-Host "  File: $candidate"
+                Write-Host "  $_"
+            }
+            exit 1
         }
-    } catch {
-        if (-not $Silent) {
-            Write-Host '  ERROR: Could not parse Claude Desktop config.' -ForegroundColor Red
-            Write-Host "  File: $ConfigPath"
-            Write-Host "  $_"
-        }
-        exit 1
     }
-} else {
-    $configDir = Split-Path $ConfigPath
-    if (-not (Test-Path $configDir)) { New-Item -ItemType Directory -Path $configDir -Force | Out-Null }
 }
+if (-not $config) { $config = [PSCustomObject]@{} }
+if (-not ($config | Get-Member -Name 'mcpServers' -ErrorAction SilentlyContinue)) {
+    $config | Add-Member -NotePropertyName 'mcpServers' -NotePropertyValue ([PSCustomObject]@{})
+}
+$realDir = Split-Path $ConfigPaths.Real
+if (-not (Test-Path $realDir)) { New-Item -ItemType Directory -Path $realDir -Force | Out-Null }
 
 # 9. Drop legacy 'remind-me' and 'cron-mcp' entries if present.
 foreach ($legacyKey in @('remind-me', 'cron-mcp')) {
@@ -238,26 +319,68 @@ $entry = [PSCustomObject]@{
 }
 $config.mcpServers | Add-Member -NotePropertyName 'prompt-time' -NotePropertyValue $entry -Force
 
-# Atomic config write. The README promises "other MCP servers untouched" --
-# that promise is only safe if a power loss between truncate and write can't
-# happen. Stage the new content to .tmp, then File.Replace which atomically
-# swaps the file AND keeps the previous bytes as $ConfigPath.prompt-time.bak --
-# free undo for any user who reports "install ate my Claude config."
+# Atomic config write. Each target file is staged via .prompt-time.tmp and
+# atomically swapped with File.Replace, which preserves the previous bytes as
+# .prompt-time.bak (free undo). Other MCP entries are preserved.
+#
+# We write to BOTH paths whenever the shadow exists: shadow is what Claude
+# actually reads, Real is what diagnostics + uninstall + manual inspection
+# expect. If shadow does not exist on this machine, MSIX read-through still
+# resolves Real, so writing only Real is correct.
 $json      = $config | ConvertTo-Json -Depth 10
 $utf8NoBom = New-Object System.Text.UTF8Encoding $false
-$tmpPath   = "$ConfigPath.prompt-time.tmp"
-$bakPath   = "$ConfigPath.prompt-time.bak"
-[System.IO.File]::WriteAllText($tmpPath, $json, $utf8NoBom)
-if (Test-Path $ConfigPath) {
-    [System.IO.File]::Replace($tmpPath, $ConfigPath, $bakPath)
-} else {
-    [System.IO.File]::Move($tmpPath, $ConfigPath)
+
+$writeTargets = @($ConfigPaths.Real)
+if ($ConfigPaths.Shadow -and (Test-Path $ConfigPaths.Shadow)) { $writeTargets += $ConfigPaths.Shadow }
+
+foreach ($target in $writeTargets) {
+    $targetDir = Split-Path $target
+    if (-not (Test-Path $targetDir)) { New-Item -ItemType Directory -Path $targetDir -Force | Out-Null }
+    $tmpPath = "$target.prompt-time.tmp"
+    $bakPath = "$target.prompt-time.bak"
+    [System.IO.File]::WriteAllText($tmpPath, $json, $utf8NoBom)
+    if (Test-Path $target) {
+        [System.IO.File]::Replace($tmpPath, $target, $bakPath)
+    } else {
+        [System.IO.File]::Move($tmpPath, $target)
+    }
 }
 
 if (-not $Silent) {
     Write-Host '  OK  prompt-time added to Claude Desktop config' -ForegroundColor Green
-    Write-Host "      $ConfigPath" -ForegroundColor DarkGray
+    foreach ($p in $writeTargets) { Write-Host "      $p" -ForegroundColor DarkGray }
+    if ($ConfigPaths.Shadow -and -not (Test-Path $ConfigPaths.Shadow)) {
+        Write-Host '      (MSIX shadow not present yet -- Claude reads from %APPDATA%; single-write is correct)' -ForegroundColor DarkGray
+    } elseif ($ConfigPaths.Shadow) {
+        Write-Host '      (MSIX shadow detected -- wrote to both paths to defeat file virtualization)' -ForegroundColor DarkGray
+    }
     Write-Host ''
+}
+
+# 10b. Verify prompt_time.ps1 will actually launch when Claude Desktop spawns it.
+#      Detects AppLocker / WDAC / signature-required policies that block powershell.exe
+#      from running scripts in this folder. Without this check, install reports OK,
+#      Claude Desktop restarts, and the tools silently never appear.
+if (-not $Silent) {
+    $spawn = Test-McpServerSpawnable -ScriptPath $McpScript
+    if ($spawn.ok) {
+        Write-Host '  OK  MCP server responded to test initialize' -ForegroundColor Green
+        Write-Host ''
+    } else {
+        Write-Host '  WARN MCP server did not respond to test initialize.' -ForegroundColor Yellow
+        Write-Host "       reason: $($spawn.reason)" -ForegroundColor Yellow
+        if ($spawn.stderr) {
+            $stderrTrim = $spawn.stderr.Trim()
+            if ($stderrTrim) {
+                Write-Host '       stderr:' -ForegroundColor Yellow
+                foreach ($line in $stderrTrim -split "`r?`n") { Write-Host "         $line" -ForegroundColor DarkGray }
+            }
+        }
+        if ($spawn.hint) { Write-Host "       hint: $($spawn.hint)" -ForegroundColor Yellow }
+        Write-Host '       The Claude Desktop restart will likely not surface the tools either.' -ForegroundColor Yellow
+        Write-Host '       Run diagnose.bat after the restart for a deeper check.' -ForegroundColor Yellow
+        Write-Host ''
+    }
 }
 
 # 11. Restart Claude Desktop if running.
