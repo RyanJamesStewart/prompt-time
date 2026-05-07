@@ -20,7 +20,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$PROMPTTIME_VERSION = '2.2.5'
+$PROMPTTIME_VERSION = '2.2.6'
 
 # Pre-flight: ConstrainedLanguage mode silently kills [System.IO.File]::Replace
 # and atomic JSON writes that this script depends on. Without this guard we
@@ -44,7 +44,8 @@ if ($ExecutionContext.SessionState.LanguageMode -ne 'FullLanguage') {
     exit 1
 }
 $ScriptDir   = $PSScriptRoot
-$McpScript   = Join-Path $ScriptDir 'prompt_time.ps1'
+# Source files (in the user's extracted-zip folder; disposable after install).
+$McpSrc      = Join-Path $ScriptDir 'prompt_time.ps1'
 $WatcherSrc  = Join-Path $ScriptDir 'prompt-time-watcher.ps1'
 $WatcherTask = 'PROMPTTIME-Watcher'
 
@@ -87,7 +88,12 @@ function Get-PromptTimeDataDir {
 $dataInfo    = Get-PromptTimeDataDir
 $DataDir     = $dataInfo.Path
 $IsMsix      = $dataInfo.IsMsix
+# Canonical install destinations inside the data dir. Both watcher AND MCP
+# server are copied here so the user can delete the extracted-zip folder
+# after install. The Claude Desktop config + the Task Scheduler action both
+# reference these data-dir copies, never the original $ScriptDir.
 $WatcherDest = Join-Path $DataDir 'prompt-time-watcher.ps1'
+$McpDest     = Join-Path $DataDir 'prompt_time.ps1'
 
 function Write-Banner {
     if ($Silent) { return }
@@ -163,7 +169,7 @@ function Exit-WithCountdown([int]$code) {
 Write-Banner
 
 # 1. Verify required script files exist alongside this installer
-foreach ($p in @($McpScript, $WatcherSrc)) {
+foreach ($p in @($McpSrc, $WatcherSrc)) {
     if (-not (Test-Path $p)) {
         if (-not $Silent) {
             Write-Host "  ERROR: $(Split-Path $p -Leaf) not found at $p" -ForegroundColor Red
@@ -216,9 +222,12 @@ foreach ($f in @('queue.jsonl', 'prompt-time.debug.log')) {
 $VersionPath = Join-Path $DataDir 'VERSION'
 Set-Content -Path $VersionPath -Value $PROMPTTIME_VERSION -Encoding UTF8
 
-# 3. Copy the watcher script into the data dir so it survives even if the
-#    install dir is later moved/removed.
+# 3. Copy both the watcher and the MCP server scripts into the data dir so
+#    they survive after the user deletes the extracted-zip folder. Claude
+#    Desktop's config + the scheduled task action will reference these copies,
+#    never the original $ScriptDir.
 Copy-Item -Path $WatcherSrc -Destination $WatcherDest -Force
+Copy-Item -Path $McpSrc     -Destination $McpDest     -Force
 
 # 4. Stop and remove any existing PROMPTTIME-Watcher task (idempotent re-install).
 try {
@@ -401,7 +410,7 @@ $entry = [PSCustomObject]@{
         '-NoProfile',
         '-NonInteractive',
         '-ExecutionPolicy', 'Bypass',
-        '-File', $McpScript
+        '-File', $McpDest
     )
 }
 $config.mcpServers | Add-Member -NotePropertyName 'prompt-time' -NotePropertyValue $entry -Force
@@ -480,7 +489,7 @@ if (-not $Silent) {
 #      from running scripts in this folder. Without this check, install reports OK,
 #      Claude Desktop restarts, and the tools silently never appear.
 if (-not $Silent) {
-    $spawn = Test-McpServerSpawnable -ScriptPath $McpScript
+    $spawn = Test-McpServerSpawnable -ScriptPath $McpDest
     if ($spawn.ok) {
         Write-Host '  OK  MCP server responded to test initialize' -ForegroundColor Green
         Write-Host ''
