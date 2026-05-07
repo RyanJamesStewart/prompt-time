@@ -2,7 +2,7 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.RyanJamesStewart/prompt-time",
   "description": "Claude Desktop reminders for Windows. Survives MSIX boundary; persists across restarts. Zero deps.",
-  "version": "2.2.1",
+  "version": "2.2.2",
   "homepage": "https://github.com/RyanJamesStewart/prompt-time",
   "repository": {
     "url": "https://github.com/RyanJamesStewart/prompt-time",
@@ -11,9 +11,9 @@
   "packages": [
     {
       "registryType": "mcpb",
-      "identifier": "https://github.com/RyanJamesStewart/prompt-time/releases/download/v2.2.1/prompt-time-v2.2.1.mcpb",
-      "version": "2.2.1",
-      "fileSha256": "067cf69dc19b28b728070a058806fcca5a3812f9bf418a8618bf66eb8fb63c02",
+      "identifier": "https://github.com/RyanJamesStewart/prompt-time/releases/download/v2.2.2/prompt-time-v2.2.2.mcpb",
+      "version": "2.2.2",
+      "fileSha256": "e735ba7563efde9a3d960688373aa6557e007b1495c309c06e71fc180df53fb3",
       "runtimeHint": "powershell.exe",
       "runtimeArguments": [
         {

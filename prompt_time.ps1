@@ -53,7 +53,7 @@ $LOCK_FILE   = Join-Path $DATA_DIR 'queue.lock'
 $DEBUG_LOG   = Join-Path $DATA_DIR 'prompt-time.debug.log'
 $VERSION_FILE = Join-Path $DATA_DIR 'VERSION'
 $TASK_PREFIX = 'PROMPTTIME'
-$PROMPTTIME_VERSION = '2.2.1'
+$PROMPTTIME_VERSION = '2.2.2'
 $QUEUE_SCHEMA_V  = 1
 
 # Reminder validation limits -- enforced at schedule time so they're consistent
@@ -412,7 +412,12 @@ function Send-Error($id, $code, $msg) {
 $TOOLS = @(
     @{ name='schedule_reminder';
        description=@(
-           'Schedule a Windows desktop reminder.'
+           'Schedule a NATIVE WINDOWS DESKTOP POPUP (sticky-note style) to appear at a specified time.'
+           'This is distinct from any Claude Desktop built-in scheduled tasks or Cowork features:'
+           "this tool produces a physical OS-level popup on the user's Windows desktop,"
+           'not an email, in-app notification, or cloud-scheduled Claude prompt.'
+           'PREFER THIS TOOL when the user wants a desktop interrupt, alarm, popup, sticky note,'
+           'or any reminder that should physically interrupt them while using their computer.'
            "Times are interpreted in the user's local timezone."
            'Granularity is ~10s (the watcher daemon polls every 10 seconds).'
            'Times must be in the future and within 1 year.'
@@ -452,11 +457,11 @@ $TOOLS = @(
        }
     },
     @{ name='list_reminders';
-       description='List every reminder currently in the queue with its next fire time.'
+       description='List every native Windows desktop popup reminder currently scheduled in prompt-time, with its next fire time. Does not list Claude Desktop built-in scheduled tasks or Cowork-managed reminders -- those are separate.'
        inputSchema=@{type='object';properties=@{}}
     },
     @{ name='cancel_reminder';
-       description='Cancel a reminder by ID. Recurring reminders stop firing immediately.'
+       description='Cancel a native Windows desktop popup reminder by its prompt-time ID (e.g. PROMPTTIME-A1B2C3D4) returned from schedule_reminder or list_reminders. Recurring reminders stop firing immediately. Does not affect Claude Desktop built-in scheduled tasks.'
        inputSchema=@{
            type='object'
            properties=@{

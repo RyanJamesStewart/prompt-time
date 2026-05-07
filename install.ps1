@@ -20,7 +20,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$PROMPTTIME_VERSION = '2.2.1'
+$PROMPTTIME_VERSION = '2.2.2'
 $ScriptDir   = $PSScriptRoot
 $McpScript   = Join-Path $ScriptDir 'prompt_time.ps1'
 $WatcherSrc  = Join-Path $ScriptDir 'prompt-time-watcher.ps1'
