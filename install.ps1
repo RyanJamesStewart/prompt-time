@@ -20,7 +20,29 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$PROMPTTIME_VERSION = '2.2.3'
+$PROMPTTIME_VERSION = '2.2.4'
+
+# Pre-flight: ConstrainedLanguage mode silently kills [System.IO.File]::Replace
+# and atomic JSON writes that this script depends on. Without this guard we
+# would throw on line 250-ish of execution with a confusing error. Bail loudly
+# and tell the user what's actually happening. Device Guard / WDAC user-mode
+# enforcement triggers ConstrainedLanguage automatically, so this check covers
+# both classes of org policy.
+if ($ExecutionContext.SessionState.LanguageMode -ne 'FullLanguage') {
+    $mode = $ExecutionContext.SessionState.LanguageMode
+    Write-Host ''
+    Write-Host "  ERROR: PowerShell is running in $mode mode." -ForegroundColor Red
+    Write-Host '  prompt-time install requires FullLanguage mode (atomic file writes + JSON parsing).' -ForegroundColor Red
+    Write-Host ''
+    Write-Host '  This is almost always Device Guard / WDAC user-mode enforcement, set by your' -ForegroundColor Yellow
+    Write-Host '  organization. Independent confirmation:' -ForegroundColor Yellow
+    Write-Host '    Get-CimInstance -ClassName Win32_DeviceGuard' -ForegroundColor DarkGray
+    Write-Host '    [guid]::NewGuid()    # throws in ConstrainedLanguage' -ForegroundColor DarkGray
+    Write-Host ''
+    Write-Host '  Fix path: ask IT to allowlist this script, or run on an unmanaged machine.' -ForegroundColor Yellow
+    Write-Host ''
+    exit 1
+}
 $ScriptDir   = $PSScriptRoot
 $McpScript   = Join-Path $ScriptDir 'prompt_time.ps1'
 $WatcherSrc  = Join-Path $ScriptDir 'prompt-time-watcher.ps1'
@@ -264,7 +286,34 @@ if (-not $NoRestart) {
 }
 
 if (-not $Silent) {
-    Write-Host "  OK  watcher task registered: $WatcherTask" -ForegroundColor Green
+    # Wait briefly for Task Scheduler to materialize state, then show what it
+    # actually says about the running watcher. "is running (267009)" beats raw
+    # 267009 if anyone reads this banner during a support call.
+    Start-Sleep -Milliseconds 500
+    $statusText = ''
+    try {
+        $info = Get-ScheduledTask -TaskName $WatcherTask -ErrorAction Stop | Get-ScheduledTaskInfo -ErrorAction Stop
+        $code = [uint32]$info.LastTaskResult
+        $statusText = switch ($code) {
+            0          { 'success' }
+            267009     { 'is running' }
+            267011     { 'has not run yet' }
+            267010     { 'is queued' }
+            2147750687 { 'disabled' }
+            2147942405 { 'access denied (0x80070005)' }
+            default    {
+                # 0xC0000005 etc. -- show hex when it isn't a known friendly code.
+                ('exit 0x{0:X8}' -f $code)
+            }
+        }
+    } catch {
+        Write-Verbose "Watcher status read failed: $_"
+    }
+    if ($statusText) {
+        Write-Host "  OK  watcher task registered: $WatcherTask ($statusText)" -ForegroundColor Green
+    } else {
+        Write-Host "  OK  watcher task registered: $WatcherTask" -ForegroundColor Green
+    }
     Write-Host '      runs at logon, restart-on-failure' -ForegroundColor DarkGray
     Write-Host ''
 }
@@ -346,8 +395,39 @@ foreach ($target in $writeTargets) {
     }
 }
 
+# Post-write self-verify. Re-read each target, parse, confirm prompt-time
+# survived. Catches: AV/EDR rolling back our write, managed-config policy
+# stripping it, MSIX virtualization redirecting to a different shadow than
+# we computed, file-handle locks leaving an empty file. Without this check,
+# install reports OK on machines where the entry never landed, and the user
+# discovers the failure after restarting Claude Desktop.
+$verifyFailures = @()
+foreach ($target in $writeTargets) {
+    try {
+        $raw  = Get-Content $target -Raw -Encoding UTF8
+        $obj  = $raw | ConvertFrom-Json
+        $ok   = $obj.mcpServers -and ($obj.mcpServers | Get-Member -Name 'prompt-time' -ErrorAction SilentlyContinue)
+        if (-not $ok) { $verifyFailures += "$target -- prompt-time entry missing after write" }
+    } catch {
+        $verifyFailures += "$target -- $($_.Exception.Message)"
+    }
+}
+if ($verifyFailures.Count -gt 0) {
+    if (-not $Silent) {
+        Write-Host '  ERROR: post-write self-verify FAILED.' -ForegroundColor Red
+        foreach ($f in $verifyFailures) { Write-Host "         $f" -ForegroundColor Red }
+        Write-Host '         The install path WROTE the entry but a re-read does not see it.' -ForegroundColor Yellow
+        Write-Host '         Most likely causes:' -ForegroundColor Yellow
+        Write-Host '           - AV/EDR (CrowdStrike, Defender, etc.) rolled the write back' -ForegroundColor Yellow
+        Write-Host '           - Managed Claude Desktop policy is overwriting the config' -ForegroundColor Yellow
+        Write-Host '           - File system redirected our write to a different path than expected' -ForegroundColor Yellow
+        Write-Host '         Run diagnose.bat for a full breakdown.' -ForegroundColor Yellow
+    }
+    exit 1
+}
+
 if (-not $Silent) {
-    Write-Host '  OK  prompt-time added to Claude Desktop config' -ForegroundColor Green
+    Write-Host '  OK  prompt-time added to Claude Desktop config (verified)' -ForegroundColor Green
     foreach ($p in $writeTargets) { Write-Host "      $p" -ForegroundColor DarkGray }
     if ($ConfigPaths.Shadow -and -not (Test-Path $ConfigPaths.Shadow)) {
         Write-Host '      (MSIX shadow not present yet -- Claude reads from %APPDATA%; single-write is correct)' -ForegroundColor DarkGray

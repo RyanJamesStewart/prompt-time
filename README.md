@@ -18,7 +18,7 @@ Reminders persist across reboots and Claude restarts. There is no cloud surface 
 
 ## Install in 60 seconds
 
-1. Download `prompt-time-v2.2.3.zip` from the [latest release](https://github.com/RyanJamesStewart/prompt-time/releases/latest).
+1. Download `prompt-time-v2.2.4.zip` from the [latest release](https://github.com/RyanJamesStewart/prompt-time/releases/latest).
 2. **Right-click the zip → Extract All.** Windows must extract — running `install.bat` from inside the zip preview window will not work.
 3. Open the extracted folder, double-click **`install.bat`**.
 4. If Claude Desktop is running, the installer will prompt to restart it. Accept — the MCP tools only show up after Claude Desktop is restarted.
@@ -59,7 +59,7 @@ prompt-time resolves this once: at startup, every component (`prompt_time.ps1`, 
 
 The installer also pre-creates the queue file at the canonical path before the MCP server's first write — without that, MSIX file-virtualization redirects new file creation into the package shadow even though existing files at the real path are written through.
 
-The same trap bites the Claude Desktop config itself. If MSIX-packaged Claude has ever written to its own `claude_desktop_config.json` (e.g. saving preferences), MSIX materializes a per-package shadow copy at `%LOCALAPPDATA%\Packages\<family>\LocalCache\Roaming\Claude\claude_desktop_config.json` and then *reads from the shadow* on every subsequent boot. An installer that writes only to `%APPDATA%` becomes invisible to Claude on those machines. v2.2.3 reads shadow-first as the source of truth and writes the merged config to both paths atomically; uninstall removes from both. Run `diagnose.bat` to detect divergence.
+The same trap bites the Claude Desktop config itself. If MSIX-packaged Claude has ever written to its own `claude_desktop_config.json` (e.g. saving preferences), MSIX materializes a per-package shadow copy at `%LOCALAPPDATA%\Packages\<family>\LocalCache\Roaming\Claude\claude_desktop_config.json` and then *reads from the shadow* on every subsequent boot. An installer that writes only to `%APPDATA%` becomes invisible to Claude on those machines. v2.2.3+ reads shadow-first as the source of truth and writes the merged config to both paths atomically; uninstall removes from both. v2.2.4 adds post-write self-verify so install fails loudly with an actionable error if the entry doesn't survive (AV rollback, managed-policy override, etc.) instead of reporting a false success. Run `diagnose.bat` for a full breakdown.
 
 ## Troubleshooting
 

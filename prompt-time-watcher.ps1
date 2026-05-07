@@ -34,7 +34,7 @@ $LOCK_FILE       = Join-Path $DATA_DIR 'queue.lock'
 $QUARANTINE_FILE = Join-Path $DATA_DIR 'queue.jsonl.quarantine'
 $DEBUG_LOG       = Join-Path $DATA_DIR 'prompt-time.debug.log'
 $POLL_SECONDS    = 10
-$WATCHER_VERSION = '2.2.3'
+$WATCHER_VERSION = '2.2.4'
 
 # Operational caps.
 $MAX_LOG_BYTES        = 1MB     # rotate when exceeded; keep one rolled file
